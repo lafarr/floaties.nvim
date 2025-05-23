@@ -86,8 +86,6 @@ local function open_terminal_window(terminal)
 
 	-- Set up key mappings for the terminal buffer
 	local opts = { buffer = terminal.buf, silent = true }
-	vim.keymap.set("t", "<C-\\><C-n>", "<C-\\><C-n>", opts)
-	vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", opts)
 end
 
 -- Close terminal window
@@ -319,6 +317,7 @@ function M.kill_all()
 end
 
 -- Run a command in a scratch terminal
+-- Run a command in a scratch terminal
 function M.run_command(cmd)
 	if not cmd or cmd == "" then
 		vim.ui.input({ prompt = "Enter command to run: " }, function(input)
@@ -332,7 +331,8 @@ function M.run_command(cmd)
 	-- Create a temporary buffer for the scratch terminal
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
-	vim.api.nvim_buf_set_option(buf, "filetype", "terminal")
+	vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+	vim.api.nvim_buf_set_option(buf, "swapfile", false)
 
 	-- Create window configuration
 	local win_config = get_window_config()
@@ -341,69 +341,90 @@ function M.run_command(cmd)
 	local win = vim.api.nvim_open_win(buf, true, win_config)
 	vim.api.nvim_win_set_option(win, "winblend", config.winblend)
 
-	-- Create a wrapper command that will exit immediately after completion
-	local shell_cmd
-	if vim.fn.has('win32') == 1 then
-		-- Windows - exit immediately after command
-		shell_cmd = { 'cmd', '/c', cmd ..
-		' && echo. && echo [Command completed - window will close automatically] && timeout /t 2 >nul' }
-	else
-		-- Unix-like systems - exit immediately after command
-		shell_cmd = { 'sh', '-c', cmd .. '; sleep 1' }
-	end
+	-- Set initial content
+	vim.api.nvim_buf_set_option(buf, "modifiable", true)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "$ " .. cmd, "" })
+	vim.api.nvim_buf_set_option(buf, "modifiable", false)
 
-	-- Start the terminal with the command
-	local job_id = vim.fn.termopen(shell_cmd, {
+	-- Run command and capture output
+	local job_id = vim.fn.jobstart(cmd, {
+		stdout_buffered = true,
+		stderr_buffered = true,
+		on_stdout = function(_, data, _)
+			if data and #data > 0 then
+				vim.schedule(function()
+					if vim.api.nvim_buf_is_valid(buf) then
+						vim.api.nvim_buf_set_option(buf, "modifiable", true)
+						-- Filter out empty strings that jobstart sometimes adds
+						local filtered_data = {}
+						for _, line in ipairs(data) do
+							if line ~= "" then
+								table.insert(filtered_data, line)
+							end
+						end
+						if #filtered_data > 0 then
+							vim.api.nvim_buf_set_lines(buf, -1, -1, false, filtered_data)
+						end
+						vim.api.nvim_buf_set_option(buf, "modifiable", false)
+					end
+				end)
+			end
+		end,
+		on_stderr = function(_, data, _)
+			if data and #data > 0 then
+				vim.schedule(function()
+					if vim.api.nvim_buf_is_valid(buf) then
+						vim.api.nvim_buf_set_option(buf, "modifiable", true)
+						-- Filter out empty strings that jobstart sometimes adds
+						local filtered_data = {}
+						for _, line in ipairs(data) do
+							if line ~= "" then
+								table.insert(filtered_data, line)
+							end
+						end
+						if #filtered_data > 0 then
+							vim.api.nvim_buf_set_lines(buf, -1, -1, false, filtered_data)
+						end
+						vim.api.nvim_buf_set_option(buf, "modifiable", false)
+					end
+				end)
+			end
+		end,
 		on_exit = function(_, exit_code, _)
-			-- Close immediately after command completes
 			vim.schedule(function()
-				if vim.api.nvim_win_is_valid(win) then
-					vim.api.nvim_win_close(win, true)
-				end
 				if vim.api.nvim_buf_is_valid(buf) then
-					vim.api.nvim_buf_delete(buf, { force = true })
+					vim.api.nvim_buf_set_option(buf, "modifiable", true)
+					if exit_code ~= 0 then
+						vim.api.nvim_buf_set_lines(buf, -1, -1, false,
+							{ "", "[Command failed with exit code " .. exit_code .. "]" })
+					end
+					vim.api.nvim_buf_set_option(buf, "modifiable", false)
 				end
 
-				if exit_code ~= 0 then
-					vim.notify("Command failed (exit code " .. exit_code .. "): " .. cmd, vim.log.levels.ERROR)
-				end
+				-- Auto-close after 2 seconds
+				vim.defer_fn(function()
+					if vim.api.nvim_win_is_valid(win) then
+						vim.api.nvim_win_close(win, true)
+					end
+					if vim.api.nvim_buf_is_valid(buf) then
+						vim.api.nvim_buf_delete(buf, { force = true })
+					end
+				end, 2000)
 			end)
 		end
 	})
 
-	-- Set up key mappings for manual close (in case user wants to close early)
+	-- Set up key mappings for manual close
 	local opts = { buffer = buf, silent = true }
 
-	-- Allow normal escape behavior
-	vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", opts)
-	vim.keymap.set("t", "<C-\\><C-n>", "<C-\\><C-n>", opts)
-
 	-- Add keys to manually close the scratch terminal
-	vim.keymap.set("n", "q", function()
-		if vim.api.nvim_win_is_valid(win) then
-			vim.api.nvim_win_close(win, true)
-		end
-		if vim.api.nvim_buf_is_valid(buf) then
-			vim.api.nvim_buf_delete(buf, { force = true })
-		end
-	end, opts)
-
-	vim.keymap.set("t", "<C-c>", function()
-		if vim.api.nvim_win_is_valid(win) then
-			vim.api.nvim_win_close(win, true)
-		end
-		if vim.api.nvim_buf_is_valid(buf) then
-			vim.api.nvim_buf_delete(buf, { force = true })
-		end
-	end, opts)
-
-	-- Enter insert mode
-	vim.cmd("startinsert")
-
 	if not job_id or job_id <= 0 then
 		print("Failed to start command: " .. cmd)
 		if vim.api.nvim_win_is_valid(win) then
 			vim.api.nvim_win_close(win, true)
+		end
+		if vim.api.nvim_buf_is_valid(buf) then
+			vim.api.nvim_buf_delete(buf, { force = true })
 		end
 	end
 end
